@@ -1,0 +1,119 @@
+import { describe, it, expect } from 'vitest'
+import { generateDutySchedule, reassignForAbsence, deriveTeacherDutyCounts } from '../src/algorithms/dutyAllocation.js'
+
+const teachers = [
+  { teacherId: 'T1', teacherName: 'Alice', status: 'Active' },
+  { teacherId: 'T2', teacherName: 'Bob', status: 'Active' },
+  { teacherId: 'T3', teacherName: 'Cara', status: 'Active' },
+  { teacherId: 'T4', teacherName: 'Dan', status: 'Active' },
+  { teacherId: 'T5', teacherName: 'Eve', status: 'Active' }
+]
+
+const classrooms = [
+  { classroomId: 'C1', classroomName: 'Room 1', status: 'Available' },
+  { classroomId: 'C2', classroomName: 'Room 2', status: 'Available' }
+]
+
+const exam = { examId: 'E1', date: '2026-09-01', day: 'Tuesday', shift: 'Morning', startTime: '09:00', endTime: '12:00', subject: 'CSE101' }
+const examClassrooms = [
+  { examId: 'E1', classroomId: 'C1' },
+  { examId: 'E1', classroomId: 'C2' }
+]
+
+const settings = { primaryTeachersPerClassroom: 2, backupTeachersPerClassroom: 1, avoidRepeatedClassroom: true, avoidRepeatedPairing: true }
+
+describe('generateDutySchedule', () => {
+  it('Test 1: prioritizes teachers with lower duty count', () => {
+    // Only 1 classroom -> 3 slots required (2 primary + 1 backup), 5 teachers available,
+    // so the single most-loaded teacher (T1) should not be needed.
+    const singleRoomLinks = [{ examId: 'E1', classroomId: 'C1' }]
+    const existingDuties = [
+      { teacherId: 'T1', role: 'PRIMARY', classroomId: 'C1', examId: 'X', date: '2026-08-01', shift: 'Morning' },
+      { teacherId: 'T1', role: 'PRIMARY', classroomId: 'C1', examId: 'X2', date: '2026-08-02', shift: 'Morning' }
+    ]
+    const result = generateDutySchedule({
+      teachers,
+      classrooms,
+      exams: [exam],
+      examClassrooms: singleRoomLinks,
+      existingDuties,
+      settings
+    })
+    const assignedIds = result.assignments.map((a) => a.teacherId)
+    // T1 already has 2 duties; teachers with 0 duties should be preferred
+    expect(assignedIds).not.toContain('T1')
+  })
+
+  it('Test 2: a teacher cannot receive two duties in the same slot', () => {
+    const result = generateDutySchedule({ teachers, classrooms, exams: [exam], examClassrooms, existingDuties: [], settings })
+    const seen = new Set()
+    for (const a of result.assignments) {
+      const key = `${a.date}|${a.shift}|${a.teacherId}`
+      expect(seen.has(key)).toBe(false)
+      seen.add(key)
+    }
+  })
+
+  it('Test 3: unavailable teachers cannot be assigned', () => {
+    const availability = [{ teacherId: 'T1', date: '2026-09-01', shift: 'Morning', available: false }]
+    const result = generateDutySchedule({ teachers, classrooms, exams: [exam], examClassrooms, availability, existingDuties: [], settings })
+    expect(result.assignments.some((a) => a.teacherId === 'T1')).toBe(false)
+  })
+
+  it('Test 4: backup teacher must be different from primaries', () => {
+    const result = generateDutySchedule({ teachers, classrooms, exams: [exam], examClassrooms, existingDuties: [], settings })
+    for (const classroomId of ['C1', 'C2']) {
+      const roomAssignments = result.assignments.filter((a) => a.classroomId === classroomId)
+      const primaries = roomAssignments.filter((a) => a.role === 'PRIMARY').map((a) => a.teacherId)
+      const backup = roomAssignments.find((a) => a.role === 'BACKUP')?.teacherId
+      if (backup) expect(primaries).not.toContain(backup)
+    }
+  })
+
+  it('Test 5: duty counts are derived correctly', () => {
+    const result = generateDutySchedule({ teachers, classrooms, exams: [exam], examClassrooms, existingDuties: [], settings })
+    const counts = deriveTeacherDutyCounts(teachers, result.assignments)
+    for (const rec of counts.values()) {
+      expect(rec.total).toBe(rec.primary + rec.backup)
+    }
+  })
+
+  it('Test 6: insufficient teachers generate warnings, not invalid assignments', () => {
+    const fewTeachers = teachers.slice(0, 2) // only 2 teachers for 2 rooms x (2 primary + 1 backup) = 6 slots
+    const result = generateDutySchedule({ teachers: fewTeachers, classrooms, exams: [exam], examClassrooms, existingDuties: [], settings })
+    expect(result.warnings.length).toBeGreaterThan(0)
+    expect(result.statistics.totalUnassigned).toBeGreaterThan(0)
+  })
+
+  it('Test 7: regeneration (re-running with same input) does not duplicate and stays deterministic', () => {
+    const result1 = generateDutySchedule({ teachers, classrooms, exams: [exam], examClassrooms, existingDuties: [], settings })
+    const result2 = generateDutySchedule({ teachers, classrooms, exams: [exam], examClassrooms, existingDuties: [], settings })
+    expect(result1.assignments).toEqual(result2.assignments)
+  })
+
+  it('errors out gracefully when there are no teachers/classrooms/exams', () => {
+    const result = generateDutySchedule({ teachers: [], classrooms, exams: [exam], examClassrooms, settings })
+    expect(result.errors.length).toBeGreaterThan(0)
+    expect(result.assignments.length).toBe(0)
+  })
+})
+
+describe('reassignForAbsence', () => {
+  it('Test 8: absence correctly promotes backup teacher to primary and assigns a new backup', () => {
+    const duties = [
+      { id: 1, examId: 'E1', classroomId: 'C1', date: '2026-09-01', shift: 'Morning', teacherId: 'T1', role: 'PRIMARY', subject: 'CSE101', day: 'Tuesday', startTime: '09:00', endTime: '12:00' },
+      { id: 2, examId: 'E1', classroomId: 'C1', date: '2026-09-01', shift: 'Morning', teacherId: 'T2', role: 'PRIMARY', subject: 'CSE101', day: 'Tuesday', startTime: '09:00', endTime: '12:00' },
+      { id: 3, examId: 'E1', classroomId: 'C1', date: '2026-09-01', shift: 'Morning', teacherId: 'T3', role: 'BACKUP', subject: 'CSE101', day: 'Tuesday', startTime: '09:00', endTime: '12:00' }
+    ]
+    const result = reassignForAbsence({ absentTeacherId: 'T1', date: '2026-09-01', shift: 'Morning', duties, teachers })
+
+    const primaries = result.updatedDuties.filter((d) => d.role === 'PRIMARY').map((d) => d.teacherId)
+    expect(primaries).toContain('T3') // promoted
+    expect(primaries).not.toContain('T1') // removed
+
+    const backup = result.updatedDuties.find((d) => d.role === 'BACKUP')
+    expect(backup).toBeTruthy()
+    expect(backup.teacherId).not.toBe('T1')
+    expect(backup.teacherId).not.toBe('T3')
+  })
+})
