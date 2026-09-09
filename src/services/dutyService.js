@@ -285,3 +285,128 @@ export async function assignDutyToTeacher({ teacherId, examId, classroomId, role
   return { ...newRecord, id }
 }
 
+export async function clearExamDuties(examId) {
+  const exam = await db.exams.get(examId)
+  await db.transaction('rw', db.duties, db.allocationHistory, async () => {
+    const deletedCount = await db.duties.where('examId').equals(examId).delete()
+    await logHistory({
+      examId,
+      action: 'DUTIES_CLEARED',
+      detail: `All duties cleared for ${exam?.subject || examId} (${deletedCount} removed).`
+    })
+  })
+}
+
+export async function saveExamManualDuties({ examId, roomAssignments, backupTeachers = [], reason = '' }) {
+  const exam = await db.exams.get(examId)
+  if (!exam) throw new Error('Exam not found')
+
+  const assignments = []
+  const now = new Date().toISOString()
+
+  for (const r of roomAssignments) {
+    if (r.teacher1) {
+      assignments.push({
+        examId,
+        date: exam.date,
+        day: exam.day,
+        shift: exam.shift,
+        startTime: exam.startTime,
+        endTime: exam.endTime,
+        classroomId: r.classroomId,
+        subject: exam.subject,
+        teacherId: r.teacher1,
+        role: 'PRIMARY',
+        assignedAt: now,
+        assignmentType: 'MANUAL'
+      })
+    }
+    if (r.teacher2) {
+      assignments.push({
+        examId,
+        date: exam.date,
+        day: exam.day,
+        shift: exam.shift,
+        startTime: exam.startTime,
+        endTime: exam.endTime,
+        classroomId: r.classroomId,
+        subject: exam.subject,
+        teacherId: r.teacher2,
+        role: 'PRIMARY',
+        assignedAt: now,
+        assignmentType: 'MANUAL'
+      })
+    }
+    if (r.backupTeacher) {
+      assignments.push({
+        examId,
+        date: exam.date,
+        day: exam.day,
+        shift: exam.shift,
+        startTime: exam.startTime,
+        endTime: exam.endTime,
+        classroomId: r.classroomId,
+        subject: exam.subject,
+        teacherId: r.backupTeacher,
+        role: 'BACKUP',
+        assignedAt: now,
+        assignmentType: 'MANUAL'
+      })
+    }
+  }
+
+  for (const teacherId of backupTeachers) {
+    if (!teacherId) continue
+    assignments.push({
+      examId,
+      date: exam.date,
+      day: exam.day,
+      shift: exam.shift,
+      startTime: exam.startTime,
+      endTime: exam.endTime,
+      classroomId: 'SHIFT_BACKUP',
+      subject: 'Shift Backup Pool',
+      teacherId,
+      role: 'BACKUP',
+      assignedAt: now,
+      assignmentType: 'MANUAL'
+    })
+  }
+
+  // Double booking check in same exam
+  const assignedTeacherIds = assignments.map((a) => a.teacherId)
+  const uniqueTeachers = new Set(assignedTeacherIds)
+  if (uniqueTeachers.size !== assignedTeacherIds.length) {
+    throw new Error('A teacher cannot be assigned multiple times to the same exam slot.')
+  }
+
+  // Double booking check across other exams in same date & shift
+  for (const a of assignments) {
+    const conflicts = await db.duties
+      .where('[date+shift+teacherId]')
+      .equals([exam.date, exam.shift, a.teacherId])
+      .toArray()
+    const otherExamConflict = conflicts.find((d) => d.examId !== examId)
+    if (otherExamConflict) {
+      const t = await db.teachers.get(a.teacherId)
+      throw new Error(`Teacher "${t?.teacherName || a.teacherId}" is already assigned to classroom ${otherExamConflict.classroomId} on ${exam.date} (${exam.shift}).`)
+    }
+  }
+
+  // Persist in DB
+  await db.transaction('rw', db.duties, db.allocationHistory, async () => {
+    await db.duties.where('examId').equals(examId).delete()
+    if (assignments.length > 0) {
+      await db.duties.bulkAdd(assignments)
+    }
+    await logHistory({
+      examId,
+      action: 'MANUAL_DUTY_BATCH_SAVED',
+      detail: `Manually assigned ${assignments.length} duties for exam ${exam.subject} (${examId}) on ${exam.date} ${exam.shift}. Reason: ${reason || 'Manual assignment'}`
+    })
+  })
+
+  return { savedCount: assignments.length }
+}
+
+
