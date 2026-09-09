@@ -34,7 +34,9 @@ db.version(1).stores({
 // Default settings applied on first run
 export const DEFAULT_SETTINGS = {
   primaryTeachersPerClassroom: 2,
-  backupTeachersPerClassroom: 1,
+  backupTeachersPerClassroom: 0,
+  enableShiftBackups: true,
+  shiftBackupPercentage: 50,
   allocationPriority: 'total', // 'total' | 'primary'
   avoidRepeatedClassroom: true,
   avoidRepeatedPairing: true

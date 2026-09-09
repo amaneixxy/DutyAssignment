@@ -28,10 +28,11 @@ export default function DutySchedule() {
 
   const teacherName = (id) => teachers.find((t) => t.teacherId === id)?.teacherName || id
 
-  // Group duties by exam+classroom+slot into one row with Teacher1/2/Backup
-  const rows = useMemo(() => {
+  // Group duties by exam+classroom into primary room assignments
+  const roomRows = useMemo(() => {
     const map = new Map()
     for (const d of duties) {
+      if (d.classroomId === 'SHIFT_BACKUP') continue
       const key = `${d.examId}|${d.classroomId}`
       if (!map.has(key)) {
         map.set(key, {
@@ -44,25 +45,37 @@ export default function DutySchedule() {
           subject: d.subject,
           examId: d.examId,
           teacher1: null,
-          teacher2: null,
-          backup: null
+          teacher2: null
         })
       }
       const row = map.get(key)
       if (d.role === 'PRIMARY') {
         if (!row.teacher1) row.teacher1 = d.teacherId
         else row.teacher2 = d.teacherId
-      } else {
-        row.backup = d.teacherId
       }
     }
     return [...map.values()]
       .filter((r) => !dateFilter || r.date === dateFilter)
       .filter((r) => !shiftFilter || r.shift === shiftFilter)
       .filter((r) => !classroomFilter || r.classroomId === classroomFilter)
-      .filter((r) => !teacherFilter || [r.teacher1, r.teacher2, r.backup].includes(teacherFilter))
+      .filter((r) => !teacherFilter || [r.teacher1, r.teacher2].includes(teacherFilter))
       .sort((a, b) => (a.date + a.shift + a.classroomId < b.date + b.shift + b.classroomId ? -1 : 1))
   }, [duties, dateFilter, shiftFilter, classroomFilter, teacherFilter])
+
+  // Shift backup pools
+  const shiftPools = useMemo(() => {
+    const map = new Map()
+    for (const d of duties) {
+      if (d.classroomId !== 'SHIFT_BACKUP') continue
+      const key = `${d.date}|${d.shift}`
+      if (!map.has(key)) map.set(key, { date: d.date, shift: d.shift, teachers: [] })
+      map.get(key).teachers.push(d.teacherId)
+    }
+    return [...map.values()]
+      .filter((p) => !dateFilter || p.date === dateFilter)
+      .filter((p) => !shiftFilter || p.shift === shiftFilter)
+      .sort((a, b) => (a.date + a.shift < b.date + b.shift ? -1 : 1))
+  }, [duties, dateFilter, shiftFilter])
 
   async function handleRegenerate() {
     setConfirmRegen(false)
@@ -78,14 +91,13 @@ export default function DutySchedule() {
   function exportCsv() {
     downloadCsv(
       'duty_schedule.csv',
-      rows.map((r) => ({
+      roomRows.map((r) => ({
         date: r.date,
         shift: r.shift,
         classroom: r.classroomId,
         subject: r.subject,
         teacher_1: r.teacher1 ? teacherName(r.teacher1) : '',
-        teacher_2: r.teacher2 ? teacherName(r.teacher2) : '',
-        backup: r.backup ? teacherName(r.backup) : ''
+        teacher_2: r.teacher2 ? teacherName(r.teacher2) : ''
       }))
     )
     toast.success('duty_schedule.csv downloaded.')
@@ -97,15 +109,14 @@ export default function DutySchedule() {
     { key: 'startTime', label: 'Time', render: (r) => `${r.startTime}–${r.endTime}` },
     { key: 'classroomId', label: 'Classroom', sortable: true },
     { key: 'subject', label: 'Subject', sortable: true },
-    { key: 'teacher1', label: 'Teacher 1', render: (r) => (r.teacher1 ? teacherName(r.teacher1) : <Badge tone="red">Missing</Badge>) },
-    { key: 'teacher2', label: 'Teacher 2', render: (r) => (r.teacher2 ? teacherName(r.teacher2) : <Badge tone="red">Missing</Badge>) },
-    { key: 'backup', label: 'Backup', render: (r) => (r.backup ? teacherName(r.backup) : <Badge tone="amber">Missing</Badge>) }
+    { key: 'teacher1', label: 'Primary Teacher 1', render: (r) => (r.teacher1 ? teacherName(r.teacher1) : <Badge tone="red">Missing</Badge>) },
+    { key: 'teacher2', label: 'Primary Teacher 2', render: (r) => (r.teacher2 ? teacherName(r.teacher2) : <Badge tone="red">Missing</Badge>) }
   ]
 
   return (
     <Layout
       title="Duty Schedule"
-      subtitle={`${rows.length} classroom assignments`}
+      subtitle={`${roomRows.length} classroom primary assignments`}
       actions={
         <>
           <Button variant="secondary" onClick={() => window.print()}>
@@ -120,40 +131,66 @@ export default function DutySchedule() {
         </>
       }
     >
-      <Card className="no-print">
-        <div className="flex flex-wrap gap-2 mb-4">
-          <Input type="date" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} className="w-auto" />
-          <Select value={shiftFilter} onChange={(e) => setShiftFilter(e.target.value)} className="w-auto min-w-[130px]">
-            <option value="">All Shifts</option>
-            <option value="Morning">Morning</option>
-            <option value="Afternoon">Afternoon</option>
-            <option value="Evening">Evening</option>
-          </Select>
-          <Select value={classroomFilter} onChange={(e) => setClassroomFilter(e.target.value)} className="w-auto min-w-[150px]">
-            <option value="">All Classrooms</option>
-            {classrooms.map((c) => (
-              <option key={c.classroomId} value={c.classroomId}>
-                {c.classroomName}
-              </option>
-            ))}
-          </Select>
-          <Select value={teacherFilter} onChange={(e) => setTeacherFilter(e.target.value)} className="w-auto min-w-[160px]">
-            <option value="">All Teachers</option>
-            {teachers.map((t) => (
-              <option key={t.teacherId} value={t.teacherId}>
-                {t.teacherName}
-              </option>
-            ))}
-          </Select>
-        </div>
+      <div className="space-y-5">
+        <Card className="no-print">
+          <div className="flex flex-wrap gap-2 mb-4">
+            <Input type="date" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} className="w-auto" />
+            <Select value={shiftFilter} onChange={(e) => setShiftFilter(e.target.value)} className="w-auto min-w-[130px]">
+              <option value="">All Shifts</option>
+              <option value="Morning">Morning</option>
+              <option value="Afternoon">Afternoon</option>
+              <option value="Evening">Evening</option>
+            </Select>
+            <Select value={classroomFilter} onChange={(e) => setClassroomFilter(e.target.value)} className="w-auto min-w-[150px]">
+              <option value="">All Classrooms</option>
+              {classrooms.map((c) => (
+                <option key={c.classroomId} value={c.classroomId}>
+                  {c.classroomName}
+                </option>
+              ))}
+            </Select>
+            <Select value={teacherFilter} onChange={(e) => setTeacherFilter(e.target.value)} className="w-auto min-w-[160px]">
+              <option value="">All Teachers</option>
+              {teachers.map((t) => (
+                <option key={t.teacherId} value={t.teacherId}>
+                  {t.teacherName}
+                </option>
+              ))}
+            </Select>
+          </div>
 
-        <DataTable
-          columns={columns}
-          rows={rows}
-          emptyTitle="No duties generated yet"
-          emptyMessage="Go to Generate Duties to create the schedule."
-        />
-      </Card>
+          <DataTable
+            columns={columns}
+            rows={roomRows}
+            emptyTitle="No duties generated yet"
+            emptyMessage="Go to Generate Duties to create the schedule."
+          />
+        </Card>
+
+        {shiftPools.length > 0 && (
+          <Card title="Shift Backup Pools (50% Floating Backups)">
+            <div className="grid md:grid-cols-2 gap-4">
+              {shiftPools.map((pool, idx) => (
+                <div key={idx} className="p-3.5 bg-brand-50/60 rounded-xl border border-brand-100 shadow-2xs">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-bold text-brand-900">
+                      {formatDate(pool.date)} &middot; {pool.shift} Shift Backup Pool
+                    </span>
+                    <Badge tone="brand">{pool.teachers.length} Backup Teachers</Badge>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {pool.teachers.map((id) => (
+                      <span key={id} className="inline-flex items-center px-3 py-1.5 rounded-lg bg-white border border-brand-200 text-xs font-semibold text-ink-800 shadow-2xs">
+                        {teacherName(id)}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+      </div>
 
       <ConfirmDialog
         open={confirmRegen}

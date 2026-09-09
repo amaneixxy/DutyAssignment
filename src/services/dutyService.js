@@ -131,7 +131,7 @@ export async function manualAssign({ examId, classroomId, role, teacherId, previ
   return newRecord
 }
 
-export async function recordAbsence({ teacherId, date, shift, reason }) {
+export async function recordAbsence({ teacherId, replacementTeacherId = null, date, shift, reason }) {
   const [duties, teachers, availability, absences] = await Promise.all([
     db.duties.where({ date, shift }).toArray(),
     db.teachers.toArray(),
@@ -141,6 +141,7 @@ export async function recordAbsence({ teacherId, date, shift, reason }) {
 
   const { updatedDuties, historyEntries, errors } = reassignForAbsence({
     absentTeacherId: teacherId,
+    replacementTeacherId,
     date,
     shift,
     duties,
@@ -149,14 +150,30 @@ export async function recordAbsence({ teacherId, date, shift, reason }) {
     absences
   })
 
+  const actualReplacementId =
+    replacementTeacherId ||
+    historyEntries.find((h) => h.action === 'REPLACE_PRIMARY_TEACHER' || h.action === 'PROMOTE_BACKUP_TO_PRIMARY')?.teacherId ||
+    null
+
   await db.transaction('rw', db.duties, db.absences, db.allocationHistory, async () => {
-    await db.absences.add({ teacherId, date, shift, reason, createdAt: new Date().toISOString() })
+    await db.absences.add({
+      teacherId,
+      replacementTeacherId: actualReplacementId,
+      date,
+      shift,
+      reason,
+      createdAt: new Date().toISOString()
+    })
     await db.duties.where({ date, shift }).delete()
     if (updatedDuties.length) await db.duties.bulkAdd(updatedDuties)
     for (const h of historyEntries) {
       await logHistory(h)
     }
-    await logHistory({ teacherId, action: 'ABSENCE_RECORDED', detail: `${teacherId} marked absent on ${date} ${shift}. Reason: ${reason || 'Not specified'}` })
+    await logHistory({
+      teacherId,
+      action: 'ABSENCE_RECORDED',
+      detail: `${teacherId} marked absent on ${date} ${shift}. Replaced by: ${actualReplacementId || 'None'}. Reason: ${reason || 'Not specified'}`
+    })
   })
 
   return { updatedDuties, historyEntries, errors }

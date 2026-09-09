@@ -20,7 +20,7 @@ export default function Absences() {
   const absences = useLiveQuery(() => db.absences.orderBy('createdAt').reverse().toArray(), [], []) || []
   const toast = useToast()
 
-  const [form, setForm] = useState({ teacherId: '', date: '', shift: 'Morning', reason: '' })
+  const [form, setForm] = useState({ teacherId: '', replacementTeacherId: '', date: '', shift: 'Morning', reason: '' })
   const [lastResult, setLastResult] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
@@ -30,6 +30,29 @@ export default function Absences() {
     if (!form.teacherId || !form.date) return []
     return duties.filter((d) => d.teacherId === form.teacherId && d.date === form.date && d.shift === form.shift)
   }, [duties, form.teacherId, form.date, form.shift])
+
+  // Get backup pool teachers available for this date & shift
+  const shiftBackupCandidates = useMemo(() => {
+    if (!form.date) return { poolTeachers: [], otherTeachers: [] }
+    const shiftBackupDuties = duties.filter(
+      (d) => d.date === form.date && d.shift === form.shift && d.classroomId === 'SHIFT_BACKUP'
+    )
+    const poolTeacherIds = new Set(shiftBackupDuties.map((d) => d.teacherId))
+
+    const primariesInSlot = new Set(
+      duties
+        .filter((d) => d.date === form.date && d.shift === form.shift && d.role === 'PRIMARY' && d.teacherId !== form.teacherId)
+        .map((d) => d.teacherId)
+    )
+
+    // First list pool teachers, then other available teachers
+    const poolTeachers = teachers.filter((t) => t.status === 'Active' && poolTeacherIds.has(t.teacherId))
+    const otherTeachers = teachers.filter(
+      (t) => t.status === 'Active' && t.teacherId !== form.teacherId && !poolTeacherIds.has(t.teacherId) && !primariesInSlot.has(t.teacherId)
+    )
+
+    return { poolTeachers, otherTeachers }
+  }, [duties, teachers, form.date, form.shift, form.teacherId])
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -47,27 +70,38 @@ export default function Absences() {
       if (result.errors.length > 0) {
         toast.warning(`Absence recorded, but ${result.errors.length} issue(s) need attention. See below.`)
       } else {
-        toast.success('Absence recorded and duties reassigned automatically.')
+        toast.success('Absence recorded and duties reassigned successfully.')
       }
-      setForm((f) => ({ ...f, date: '', reason: '' }))
+      setForm((f) => ({ ...f, date: '', replacementTeacherId: '', reason: '' }))
     } finally {
       setSubmitting(false)
     }
   }
 
   const columns = [
-    { key: 'teacherId', label: 'Teacher', sortable: true, render: (r) => teacherName(r.teacherId) },
+    { key: 'teacherId', label: 'Absent Teacher', sortable: true, render: (r) => teacherName(r.teacherId) },
     { key: 'date', label: 'Date', sortable: true, render: (r) => formatDate(r.date) },
     { key: 'shift', label: 'Shift', sortable: true },
+    {
+      key: 'replacementTeacherId',
+      label: 'Backup Teacher Used',
+      sortable: true,
+      render: (r) =>
+        r.replacementTeacherId ? (
+          <span className="font-semibold text-brand-700">{teacherName(r.replacementTeacherId)}</span>
+        ) : (
+          <span className="text-ink-400 font-normal italic">None</span>
+        )
+    },
     { key: 'reason', label: 'Reason' }
   ]
 
   return (
-    <Layout title="Teacher Absences" subtitle="Record an absence — the backup teacher is automatically promoted and a new backup is assigned">
+    <Layout title="Teacher Absences" subtitle="Record an absence and select a replacement from the 50% shift backup pool">
       <div className="grid lg:grid-cols-3 gap-5">
         <Card title="Record absence" className="lg:col-span-1">
           <form onSubmit={handleSubmit}>
-            <Field label="Teacher" required>
+            <Field label="Absent Teacher" required>
               <Select value={form.teacherId} onChange={(e) => setForm((f) => ({ ...f, teacherId: e.target.value }))}>
                 <option value="">Select teacher…</option>
                 {teachers.map((t) => (
@@ -87,6 +121,35 @@ export default function Absences() {
                 <option value="Evening">Evening</option>
               </Select>
             </Field>
+
+            <Field label="Select Backup Replacement from Pool">
+              <Select
+                value={form.replacementTeacherId}
+                onChange={(e) => setForm((f) => ({ ...f, replacementTeacherId: e.target.value }))}
+                disabled={!form.date}
+              >
+                <option value="">— Auto-promote or choose from pool —</option>
+                {shiftBackupCandidates?.poolTeachers?.length > 0 && (
+                  <optgroup label="Shift Backup Pool (Recommended)">
+                    {shiftBackupCandidates.poolTeachers.map((t) => (
+                      <option key={t.teacherId} value={t.teacherId}>
+                        ★ {t.teacherName} (Shift Backup Pool)
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {shiftBackupCandidates?.otherTeachers?.length > 0 && (
+                  <optgroup label="Other Available Teachers">
+                    {shiftBackupCandidates.otherTeachers.map((t) => (
+                      <option key={t.teacherId} value={t.teacherId}>
+                        {t.teacherName} ({t.department || t.teacherId})
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+              </Select>
+            </Field>
+
             <Field label="Reason">
               <TextArea rows={2} value={form.reason} onChange={(e) => setForm((f) => ({ ...f, reason: e.target.value }))} placeholder="Sick leave" />
             </Field>

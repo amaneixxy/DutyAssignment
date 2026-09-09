@@ -87,23 +87,35 @@ export default function GenerateDuties() {
     }
   }
 
-  const groupedPreview = useMemo(() => {
+  const roomAssignments = useMemo(() => {
     if (!preview) return []
     const map = new Map()
     for (const a of preview.assignments) {
+      if (a.classroomId === 'SHIFT_BACKUP') continue
       const key = `${a.date}|${a.shift}|${a.classroomId}`
-      if (!map.has(key)) map.set(key, { date: a.date, shift: a.shift, classroomId: a.classroomId, subject: a.subject, primaries: [], backup: null })
+      if (!map.has(key)) map.set(key, { date: a.date, shift: a.shift, classroomId: a.classroomId, subject: a.subject, primaries: [] })
       const g = map.get(key)
       if (a.role === 'PRIMARY') g.primaries.push(a.teacherId)
-      else g.backup = a.teacherId
     }
     return [...map.values()].sort((a, b) => (a.date + a.shift + a.classroomId < b.date + b.shift + b.classroomId ? -1 : 1))
+  }, [preview])
+
+  const shiftBackupPool = useMemo(() => {
+    if (!preview) return []
+    const map = new Map()
+    for (const a of preview.assignments) {
+      if (a.classroomId !== 'SHIFT_BACKUP') continue
+      const key = `${a.date}|${a.shift}`
+      if (!map.has(key)) map.set(key, { date: a.date, shift: a.shift, teachers: [] })
+      map.get(key).teachers.push(a.teacherId)
+    }
+    return [...map.values()].sort((a, b) => (a.date + a.shift < b.date + b.shift ? -1 : 1))
   }, [preview])
 
   const teacherName = (id) => teachers.find((t) => t.teacherId === id)?.teacherName || id
 
   return (
-    <Layout title="Generate Duties" subtitle="Automatically allocate primary and backup teachers to exam classrooms">
+    <Layout title="Generate Duties" subtitle="Automatically allocate primary teachers to exam classrooms and generate a 50% shift backup pool">
       <div className="grid lg:grid-cols-3 gap-5">
         <Card title="Step 1 · Date range" className="lg:col-span-1">
           <div className="grid grid-cols-2 gap-3">
@@ -140,73 +152,99 @@ export default function GenerateDuties() {
       </div>
 
       {preview && (
-        <Card
-          className="mt-5"
-          title="Allocation Preview"
-          action={
-            <div className="flex gap-2">
-              <Button variant="secondary" onClick={handleGenerate} disabled={generating}>
-                <RefreshCcw size={14} /> Generate Again
-              </Button>
-              <Button onClick={handleSave} disabled={saving || preview.assignments.length === 0}>
-                <CheckCircle2 size={15} /> {saving ? 'Saving…' : 'Save Schedule'}
-              </Button>
+        <div className="mt-5 space-y-5">
+          <Card
+            title="Allocation Preview · Classroom Primary Duties"
+            action={
+              <div className="flex gap-2">
+                <Button variant="secondary" onClick={handleGenerate} disabled={generating}>
+                  <RefreshCcw size={14} /> Generate Again
+                </Button>
+                <Button onClick={handleSave} disabled={saving || preview.assignments.length === 0}>
+                  <CheckCircle2 size={15} /> {saving ? 'Saving…' : 'Save Schedule'}
+                </Button>
+              </div>
+            }
+          >
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+              <SummaryStat label="Primary Assigned" value={preview.statistics.totalAssignedPrimary} tone="green" />
+              <SummaryStat label="Shift Backups Pool" value={preview.statistics.totalAssignedBackup} tone="green" />
+              <SummaryStat label="Warnings" value={preview.warnings.length} tone={preview.warnings.length > 0 ? 'amber' : 'green'} />
+              <SummaryStat label="Classrooms" value={preview.statistics.classroomsProcessed} />
             </div>
-          }
-        >
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-            <SummaryStat label="Assigned" value={preview.statistics.totalAssigned} tone="green" />
-            <SummaryStat label="Unassigned" value={preview.statistics.totalUnassigned} tone={preview.statistics.totalUnassigned > 0 ? 'red' : 'green'} />
-            <SummaryStat label="Warnings" value={preview.warnings.length} tone={preview.warnings.length > 0 ? 'amber' : 'green'} />
-            <SummaryStat label="Classrooms" value={preview.statistics.classroomsProcessed} />
-          </div>
 
-          {preview.warnings.length > 0 && (
-            <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3.5 space-y-1.5">
-              {preview.warnings.slice(0, 8).map((w, i) => (
-                <p key={i} className="text-sm text-amber-800 flex items-start gap-1.5">
-                  <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {w.message}
-                </p>
-              ))}
-              {preview.warnings.length > 8 && (
-                <p className="text-xs text-amber-700">…and {preview.warnings.length - 8} more warning(s).</p>
-              )}
-            </div>
-          )}
+            {preview.warnings.length > 0 && (
+              <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3.5 space-y-1.5">
+                {preview.warnings.slice(0, 8).map((w, i) => (
+                  <p key={i} className="text-sm text-amber-800 flex items-start gap-1.5">
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {w.message}
+                  </p>
+                ))}
+                {preview.warnings.length > 8 && (
+                  <p className="text-xs text-amber-700">…and {preview.warnings.length - 8} more warning(s).</p>
+                )}
+              </div>
+            )}
 
-          {groupedPreview.length === 0 ? (
-            <EmptyState icon={ClipboardList} title="No assignments generated" message="Adjust your selection and try again." />
-          ) : (
-            <div className="overflow-x-auto -mx-5">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-ink-100 text-left text-ink-500">
-                    <th className="px-5 py-2.5 font-medium">Date</th>
-                    <th className="px-5 py-2.5 font-medium">Shift</th>
-                    <th className="px-5 py-2.5 font-medium">Room</th>
-                    <th className="px-5 py-2.5 font-medium">Subject</th>
-                    <th className="px-5 py-2.5 font-medium">Primary 1</th>
-                    <th className="px-5 py-2.5 font-medium">Primary 2</th>
-                    <th className="px-5 py-2.5 font-medium">Backup</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {groupedPreview.map((g, i) => (
-                    <tr key={i} className="border-b border-ink-50 last:border-0">
-                      <td className="px-5 py-2.5">{formatDate(g.date)}</td>
-                      <td className="px-5 py-2.5">{g.shift}</td>
-                      <td className="px-5 py-2.5">{g.classroomId}</td>
-                      <td className="px-5 py-2.5">{g.subject}</td>
-                      <td className="px-5 py-2.5">{g.primaries[0] ? teacherName(g.primaries[0]) : <Badge tone="red">Missing</Badge>}</td>
-                      <td className="px-5 py-2.5">{g.primaries[1] ? teacherName(g.primaries[1]) : <Badge tone="red">Missing</Badge>}</td>
-                      <td className="px-5 py-2.5">{g.backup ? teacherName(g.backup) : <Badge tone="amber">Missing</Badge>}</td>
+            {roomAssignments.length === 0 ? (
+              <EmptyState icon={ClipboardList} title="No assignments generated" message="Adjust your selection and try again." />
+            ) : (
+              <div className="overflow-x-auto -mx-5">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-ink-100 text-left text-ink-500">
+                      <th className="px-5 py-2.5 font-medium">Date</th>
+                      <th className="px-5 py-2.5 font-medium">Shift</th>
+                      <th className="px-5 py-2.5 font-medium">Room</th>
+                      <th className="px-5 py-2.5 font-medium">Subject</th>
+                      <th className="px-5 py-2.5 font-medium">Primary 1</th>
+                      <th className="px-5 py-2.5 font-medium">Primary 2</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {roomAssignments.map((g, i) => (
+                      <tr key={i} className="border-b border-ink-50 last:border-0">
+                        <td className="px-5 py-2.5">{formatDate(g.date)}</td>
+                        <td className="px-5 py-2.5">{g.shift}</td>
+                        <td className="px-5 py-2.5 font-semibold">{g.classroomId}</td>
+                        <td className="px-5 py-2.5">{g.subject}</td>
+                        <td className="px-5 py-2.5">{g.primaries[0] ? teacherName(g.primaries[0]) : <Badge tone="red">Missing</Badge>}</td>
+                        <td className="px-5 py-2.5">{g.primaries[1] ? teacherName(g.primaries[1]) : <Badge tone="red">Missing</Badge>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          {shiftBackupPool.length > 0 && (
+            <Card title="Shift Backup Pool (50% Additional Teachers for Manual Assignment)">
+              <p className="text-xs text-ink-500 mb-3">
+                These teachers are allocated to each shift's backup pool (50% of shift primary teachers). You can manually assign them from the pool whenever a teacher is absent or needs replacement.
+              </p>
+              <div className="grid md:grid-cols-2 gap-4">
+                {shiftBackupPool.map((pool, idx) => (
+                  <div key={idx} className="p-3 bg-brand-50/50 rounded-lg border border-brand-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-semibold text-brand-900">
+                        {formatDate(pool.date)} &middot; {pool.shift} Shift Pool
+                      </span>
+                      <Badge tone="brand">{pool.teachers.length} Backup Teachers</Badge>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {pool.teachers.map((id) => (
+                        <span key={id} className="inline-flex items-center px-2.5 py-1 rounded-md bg-white border border-brand-200 text-xs font-medium text-ink-800 shadow-xs">
+                          {teacherName(id)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
           )}
-        </Card>
+        </div>
       )}
     </Layout>
   )

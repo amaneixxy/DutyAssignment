@@ -49,7 +49,9 @@ export function generateDutySchedule({
   settings = {}
 }) {
   const primaryPerRoom = settings.primaryTeachersPerClassroom ?? 2
-  const backupPerRoom = settings.backupTeachersPerClassroom ?? 1
+  const backupPerRoom = settings.backupTeachersPerClassroom ?? 0
+  const enableShiftBackups = settings.enableShiftBackups ?? true
+  const shiftBackupPct = settings.shiftBackupPercentage ?? 50
   const avoidRepeatedClassroom = settings.avoidRepeatedClassroom ?? true
   const avoidRepeatedPairing = settings.avoidRepeatedPairing ?? true
 
@@ -58,7 +60,6 @@ export function generateDutySchedule({
   const assignments = []
 
   const activeTeachers = teachers.filter((t) => t.status === 'Active')
-  const teacherById = new Map(activeTeachers.map((t) => [t.teacherId, t]))
   const classroomById = new Map(classrooms.map((c) => [c.classroomId, c]))
 
   if (activeTeachers.length === 0) {
@@ -154,6 +155,8 @@ export function generateDutySchedule({
   let totalAssignedBackup = 0
   let totalUnassigned = 0
 
+  const primariesPerShift = new Map() // "date|shift" -> { count: number, sampleExam: exam }
+
   for (const item of examClassroomList) {
     const { exam, classroomId } = item
     const classroom = classroomById.get(classroomId)
@@ -170,8 +173,11 @@ export function generateDutySchedule({
     if (!slotAssignment.has(slotKey)) slotAssignment.set(slotKey, new Set())
     const usedInSlot = slotAssignment.get(slotKey)
 
+    if (!primariesPerShift.has(slotKey)) {
+      primariesPerShift.set(slotKey, { count: 0, sampleExam: exam })
+    }
+
     totalRequiredPrimary += primaryPerRoom
-    totalRequiredBackup += backupPerRoom
 
     const chosenPrimaries = []
 
@@ -198,6 +204,7 @@ export function generateDutySchedule({
       bumpDuty(candidate, 'PRIMARY')
       classroomHistory.get(candidate)?.add(classroomId)
       totalAssignedPrimary++
+      primariesPerShift.get(slotKey).count++
     }
 
     if (chosenPrimaries.length === 2) {
@@ -218,45 +225,111 @@ export function generateDutySchedule({
       assignments.push(buildAssignment(exam, classroomId, teacherId, 'PRIMARY'))
     }
 
-    // Backup(s)
-    const chosenBackups = []
-    for (let i = 0; i < backupPerRoom; i++) {
-      const candidate = pickBestCandidate({
-        activeTeachers,
-        excludeIds: new Set([...usedInSlot, ...chosenPrimaries, ...chosenBackups]),
-        isUnavailable,
-        exam,
-        classroomId,
-        totalDuties,
-        primaryDuties,
-        backupDuties,
-        classroomHistory,
-        pairHistory,
-        pairKey,
-        chosenSoFarInRoom: chosenPrimaries,
-        avoidRepeatedClassroom,
-        avoidRepeatedPairing
-      })
-      if (!candidate) break
-      chosenBackups.push(candidate)
-      usedInSlot.add(candidate)
-      bumpDuty(candidate, 'BACKUP')
-      classroomHistory.get(candidate)?.add(classroomId)
-      totalAssignedBackup++
-    }
+    // Per-classroom backups (only if explicitly set > 0)
+    if (backupPerRoom > 0) {
+      totalRequiredBackup += backupPerRoom
+      const chosenBackups = []
+      for (let i = 0; i < backupPerRoom; i++) {
+        const candidate = pickBestCandidate({
+          activeTeachers,
+          excludeIds: new Set([...usedInSlot, ...chosenPrimaries, ...chosenBackups]),
+          isUnavailable,
+          exam,
+          classroomId,
+          totalDuties,
+          primaryDuties,
+          backupDuties,
+          classroomHistory,
+          pairHistory,
+          pairKey,
+          chosenSoFarInRoom: chosenPrimaries,
+          avoidRepeatedClassroom,
+          avoidRepeatedPairing
+        })
+        if (!candidate) break
+        chosenBackups.push(candidate)
+        usedInSlot.add(candidate)
+        bumpDuty(candidate, 'BACKUP')
+        classroomHistory.get(candidate)?.add(classroomId)
+        totalAssignedBackup++
+      }
 
-    if (chosenBackups.length < backupPerRoom) {
-      const shortage = backupPerRoom - chosenBackups.length
-      totalUnassigned += shortage
-      warnings.push({
-        examId: exam.examId,
-        classroomId,
-        message: `Room ${classroomId} (${exam.subject}, ${exam.date} ${exam.shift}) could not receive a backup teacher. Only ${chosenBackups.length}/${backupPerRoom} assigned.`
-      })
-    }
+      if (chosenBackups.length < backupPerRoom) {
+        const shortage = backupPerRoom - chosenBackups.length
+        totalUnassigned += shortage
+        warnings.push({
+          examId: exam.examId,
+          classroomId,
+          message: `Room ${classroomId} (${exam.subject}, ${exam.date} ${exam.shift}) could not receive a backup teacher. Only ${chosenBackups.length}/${backupPerRoom} assigned.`
+        })
+      }
 
-    for (const teacherId of chosenBackups) {
-      assignments.push(buildAssignment(exam, classroomId, teacherId, 'BACKUP'))
+      for (const teacherId of chosenBackups) {
+        assignments.push(buildAssignment(exam, classroomId, teacherId, 'BACKUP'))
+      }
+    }
+  }
+
+  // ---- Shift Backup Pool Allocation (50% of shift primary count) -----
+  if (enableShiftBackups && shiftBackupPct > 0) {
+    for (const [slotKey, info] of primariesPerShift.entries()) {
+      const [date, shift] = slotKey.split('|')
+      const requiredShiftBackups = Math.ceil(info.count * (shiftBackupPct / 100))
+      totalRequiredBackup += requiredShiftBackups
+
+      const usedInSlot = slotAssignment.get(slotKey) || new Set()
+      const chosenShiftBackups = []
+
+      for (let i = 0; i < requiredShiftBackups; i++) {
+        const candidate = pickBestCandidate({
+          activeTeachers,
+          excludeIds: new Set([...usedInSlot, ...chosenShiftBackups]),
+          isUnavailable,
+          exam: info.sampleExam,
+          classroomId: 'SHIFT_BACKUP',
+          totalDuties,
+          primaryDuties,
+          backupDuties,
+          classroomHistory,
+          pairHistory,
+          pairKey,
+          chosenSoFarInRoom: [],
+          avoidRepeatedClassroom: false,
+          avoidRepeatedPairing: false
+        })
+        if (!candidate) break
+        chosenShiftBackups.push(candidate)
+        usedInSlot.add(candidate)
+        bumpDuty(candidate, 'BACKUP')
+        totalAssignedBackup++
+      }
+
+      if (chosenShiftBackups.length < requiredShiftBackups) {
+        const shortage = requiredShiftBackups - chosenShiftBackups.length
+        totalUnassigned += shortage
+        warnings.push({
+          examId: info.sampleExam.examId,
+          classroomId: 'SHIFT_BACKUP',
+          message: `Shift ${date} (${shift}) backup pool is short ${shortage} teacher(s). ${chosenShiftBackups.length}/${requiredShiftBackups} assigned.`
+        })
+      }
+
+      for (const teacherId of chosenShiftBackups) {
+        assignments.push({
+          examId: info.sampleExam.examId,
+          date,
+          day: info.sampleExam.day,
+          shift,
+          startTime: info.sampleExam.startTime,
+          endTime: info.sampleExam.endTime,
+          classroomId: 'SHIFT_BACKUP',
+          subject: 'Shift Backup Pool',
+          teacherId,
+          role: 'BACKUP',
+          assignedAt: new Date().toISOString(),
+          assignmentType: 'AUTO'
+        })
+      }
     }
   }
 
@@ -367,6 +440,7 @@ function emptyStats() {
  */
 export function reassignForAbsence({
   absentTeacherId,
+  replacementTeacherId = null,
   date,
   shift,
   duties, // all duties for this date+shift (across all rooms), including the room in question
@@ -400,134 +474,64 @@ export function reassignForAbsence({
 
   for (const duty of affected) {
     if (duty.role === 'PRIMARY') {
-      // Find the backup for this same classroom/exam/slot
-      const backupDuty = updatedDuties.find(
-        (d) =>
-          d.examId === duty.examId &&
-          d.classroomId === duty.classroomId &&
-          d.role === 'BACKUP' &&
-          d.date === date &&
-          d.shift === shift
-      )
+      let chosenReplacement = replacementTeacherId
 
-      if (backupDuty) {
-        const oldBackupTeacher = backupDuty.teacherId
-        // Promote backup -> primary
-        backupDuty.role = 'PRIMARY'
-        backupDuty.assignmentType = 'MANUAL'
-        backupDuty.assignedAt = new Date().toISOString()
-        historyEntries.push({
-          examId: duty.examId,
-          classroomId: duty.classroomId,
-          teacherId: oldBackupTeacher,
-          action: 'PROMOTE_BACKUP_TO_PRIMARY',
-          detail: `${oldBackupTeacher} promoted from backup to primary, replacing absent ${absentTeacherId}`
-        })
-
-        // Remove the absent teacher's primary duty
-        const idx = updatedDuties.indexOf(duty)
-        updatedDuties.splice(idx, 1)
-        usedInSlot.delete(absentTeacherId)
-
-        // Find a new backup
-        const excludeIds = new Set([...usedInSlot])
-        let bestCandidate = null
-        let bestScore = Infinity
-        for (const t of activeTeachers) {
-          const id = t.teacherId
-          if (excludeIds.has(id)) continue
-          if (unavailableSet.has(`${id}|${date}|${shift}`)) continue
-          if (absentSet.has(`${id}|${date}|${shift}`)) continue
-          const dutyCount = updatedDuties.filter((d) => d.teacherId === id).length
-          const score = dutyCount * HIGH_WEIGHT
-          if (score < bestScore || (score === bestScore && (!bestCandidate || id < bestCandidate))) {
-            bestScore = score
-            bestCandidate = id
-          }
-        }
-
-        if (bestCandidate) {
-          updatedDuties.push({
-            examId: duty.examId,
-            date,
-            day: duty.day,
-            shift,
-            startTime: duty.startTime,
-            endTime: duty.endTime,
-            classroomId: duty.classroomId,
-            subject: duty.subject,
-            teacherId: bestCandidate,
-            role: 'BACKUP',
-            assignedAt: new Date().toISOString(),
-            assignmentType: 'AUTO'
-          })
-          usedInSlot.add(bestCandidate)
-          historyEntries.push({
-            examId: duty.examId,
-            classroomId: duty.classroomId,
-            teacherId: bestCandidate,
-            action: 'ASSIGN_NEW_BACKUP',
-            detail: `${bestCandidate} assigned as new backup after ${absentTeacherId}'s absence`
-          })
+      // If no explicit replacement specified, pick from the shift backup pool or available candidate
+      if (!chosenReplacement) {
+        const poolBackup = updatedDuties.find(
+          (d) => d.date === date && d.shift === shift && d.role === 'BACKUP' && d.classroomId === 'SHIFT_BACKUP'
+        )
+        if (poolBackup) {
+          chosenReplacement = poolBackup.teacherId
         } else {
-          errors.push({
-            message: `No available replacement backup teacher found for room ${duty.classroomId} on ${date} ${shift}.`
-          })
+          // Fallback to any per-room backup
+          const roomBackup = updatedDuties.find(
+            (d) => d.date === date && d.shift === shift && d.role === 'BACKUP'
+          )
+          if (roomBackup) chosenReplacement = roomBackup.teacherId
         }
-      } else {
-        errors.push({
-          message: `Teacher ${absentTeacherId} was absent for room ${duty.classroomId} but no backup was assigned to promote.`
-        })
       }
-    } else {
-      // Absent teacher was the backup: just remove and try to find a replacement backup
-      const idx = updatedDuties.indexOf(duty)
-      updatedDuties.splice(idx, 1)
-      usedInSlot.delete(absentTeacherId)
 
-      const excludeIds = new Set([...usedInSlot])
-      let bestCandidate = null
-      let bestScore = Infinity
-      for (const t of activeTeachers) {
-        const id = t.teacherId
-        if (excludeIds.has(id)) continue
-        if (unavailableSet.has(`${id}|${date}|${shift}`)) continue
-        if (absentSet.has(`${id}|${date}|${shift}`)) continue
-        const dutyCount = updatedDuties.filter((d) => d.teacherId === id).length
-        const score = dutyCount * HIGH_WEIGHT
-        if (score < bestScore || (score === bestScore && (!bestCandidate || id < bestCandidate))) {
-          bestScore = score
-          bestCandidate = id
+      if (chosenReplacement) {
+        // Replace absent teacher's primary duty with chosen replacement teacher
+        duty.teacherId = chosenReplacement
+        duty.assignmentType = 'MANUAL'
+        duty.assignedAt = new Date().toISOString()
+
+        // Remove the replacement teacher from the backup pool for this slot so they cannot be reused
+        const backupIdx = updatedDuties.findIndex(
+          (d) => d.teacherId === chosenReplacement && d.date === date && d.shift === shift && d.role === 'BACKUP'
+        )
+        if (backupIdx !== -1) {
+          updatedDuties.splice(backupIdx, 1)
         }
-      }
-      if (bestCandidate) {
-        updatedDuties.push({
-          examId: duty.examId,
-          date,
-          day: duty.day,
-          shift,
-          startTime: duty.startTime,
-          endTime: duty.endTime,
-          classroomId: duty.classroomId,
-          subject: duty.subject,
-          teacherId: bestCandidate,
-          role: 'BACKUP',
-          assignedAt: new Date().toISOString(),
-          assignmentType: 'AUTO'
-        })
-        usedInSlot.add(bestCandidate)
+
         historyEntries.push({
           examId: duty.examId,
           classroomId: duty.classroomId,
-          teacherId: bestCandidate,
-          action: 'ASSIGN_NEW_BACKUP',
-          detail: `${bestCandidate} assigned as new backup after ${absentTeacherId}'s absence`
+          teacherId: chosenReplacement,
+          action: 'REPLACE_PRIMARY_TEACHER',
+          detail: `${chosenReplacement} assigned to primary duty in room ${duty.classroomId}, replacing absent ${absentTeacherId} (removed from shift backup pool)`
         })
       } else {
+        // No backup available: remove the duty and log error
+        const idx = updatedDuties.indexOf(duty)
+        if (idx !== -1) updatedDuties.splice(idx, 1)
         errors.push({
           message: `No available replacement backup teacher found for room ${duty.classroomId} on ${date} ${shift}.`
         })
       }
+    } else {
+      // Absent teacher was in the backup pool: remove them from the backup pool
+      const idx = updatedDuties.indexOf(duty)
+      if (idx !== -1) updatedDuties.splice(idx, 1)
+      historyEntries.push({
+        examId: duty.examId,
+        classroomId: duty.classroomId,
+        teacherId: absentTeacherId,
+        action: 'REMOVE_ABSENT_BACKUP',
+        detail: `Absent teacher ${absentTeacherId} removed from backup pool on ${date} ${shift}`
+      })
     }
   }
 
