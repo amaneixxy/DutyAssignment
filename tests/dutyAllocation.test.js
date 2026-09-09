@@ -102,9 +102,10 @@ describe('generateDutySchedule', () => {
   })
 
   it('Test 8: regeneration is deterministic', () => {
+    const stripTimestamps = (arr) => arr.map(({ assignedAt, ...rest }) => rest)
     const result1 = generateDutySchedule({ teachers, classrooms, exams: [exam], examClassrooms, existingDuties: [], settings })
     const result2 = generateDutySchedule({ teachers, classrooms, exams: [exam], examClassrooms, existingDuties: [], settings })
-    expect(result1.assignments).toEqual(result2.assignments)
+    expect(stripTimestamps(result1.assignments)).toEqual(stripTimestamps(result2.assignments))
   })
 })
 

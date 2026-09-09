@@ -183,3 +183,105 @@ export async function getAllocationHistory({ limit = 200 } = {}) {
   const rows = await db.allocationHistory.orderBy('timestamp').reverse().limit(limit).toArray()
   return rows
 }
+
+export async function deleteDuty(dutyId, { reason = '' } = {}) {
+  const duty = await db.duties.get(Number(dutyId))
+  if (!duty) return
+  await db.duties.delete(Number(dutyId))
+  await logHistory({
+    examId: duty.examId,
+    classroomId: duty.classroomId,
+    teacherId: duty.teacherId,
+    action: 'DUTY_REMOVED',
+    detail: `Duty for ${duty.teacherId} (${duty.role} - ${duty.subject || duty.examId} in ${duty.classroomId}) removed. Reason: ${reason || 'Manual removal'}`
+  })
+}
+
+export async function updateDutyRole(dutyId, newRole, { reason = '' } = {}) {
+  const duty = await db.duties.get(Number(dutyId))
+  if (!duty) throw new Error('Duty not found')
+  const oldRole = duty.role
+  await db.duties.update(Number(dutyId), {
+    role: newRole,
+    assignmentType: 'MANUAL',
+    assignedAt: new Date().toISOString()
+  })
+  await logHistory({
+    examId: duty.examId,
+    classroomId: duty.classroomId,
+    teacherId: duty.teacherId,
+    action: 'DUTY_ROLE_UPDATED',
+    detail: `Role for ${duty.teacherId} changed from ${oldRole} to ${newRole} for ${duty.classroomId} on ${duty.date} ${duty.shift}. Reason: ${reason || 'Manual role update'}`
+  })
+}
+
+export async function reassignDuty(dutyId, newTeacherId, { reason = '' } = {}) {
+  const duty = await db.duties.get(Number(dutyId))
+  if (!duty) throw new Error('Duty not found')
+  if (duty.teacherId === newTeacherId) return
+
+  // Validate double-booking for the target teacher in same date & shift
+  const conflict = await db.duties
+    .where('[date+shift+teacherId]')
+    .equals([duty.date, duty.shift, newTeacherId])
+    .first()
+
+  if (conflict && conflict.id !== duty.id) {
+    throw new Error(`Teacher ${newTeacherId} is already assigned to ${conflict.classroomId} during ${duty.date} (${duty.shift}).`)
+  }
+
+  const prevTeacher = duty.teacherId
+  await db.duties.update(Number(dutyId), {
+    teacherId: newTeacherId,
+    assignmentType: 'MANUAL',
+    assignedAt: new Date().toISOString()
+  })
+  await logHistory({
+    examId: duty.examId,
+    classroomId: duty.classroomId,
+    teacherId: newTeacherId,
+    action: 'MANUAL_REASSIGN',
+    detail: `${prevTeacher} -> ${newTeacherId} (${duty.role}) in ${duty.classroomId} on ${duty.date} ${duty.shift}. Reason: ${reason || 'Manual reassignment'}`
+  })
+}
+
+export async function assignDutyToTeacher({ teacherId, examId, classroomId, role = 'PRIMARY', reason = '' }) {
+  const exam = await db.exams.get(examId)
+  if (!exam) throw new Error('Exam not found')
+
+  // Check collision in same date & shift
+  const conflict = await db.duties
+    .where('[date+shift+teacherId]')
+    .equals([exam.date, exam.shift, teacherId])
+    .first()
+
+  if (conflict) {
+    throw new Error(`Teacher is already assigned to ${conflict.classroomId} during ${exam.date} (${exam.shift}).`)
+  }
+
+  const newRecord = {
+    examId,
+    date: exam.date,
+    day: exam.day,
+    shift: exam.shift,
+    startTime: exam.startTime,
+    endTime: exam.endTime,
+    classroomId,
+    subject: classroomId === 'SHIFT_BACKUP' ? 'Shift Backup Pool' : exam.subject,
+    teacherId,
+    role,
+    assignedAt: new Date().toISOString(),
+    assignmentType: 'MANUAL'
+  }
+
+  const id = await db.duties.add(newRecord)
+  await logHistory({
+    examId,
+    classroomId,
+    teacherId,
+    action: 'MANUAL_ASSIGN',
+    detail: `${teacherId} manually assigned as ${role} for ${classroomId} on ${exam.date} ${exam.shift}. Reason: ${reason || 'Manual duty addition'}`
+  })
+  return { ...newRecord, id }
+}
+
